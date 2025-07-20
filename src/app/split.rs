@@ -48,7 +48,7 @@ pub fn SplitUI() -> Element {
                                     icon: ld_icons::LdBookPlus,
                                 }
                                 span { class: "ml-2", "Add Item" }
-
+                            
                             }
                         }
                         div {

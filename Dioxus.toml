@@ -4,7 +4,7 @@ out_dir = "dist"
 [web.app]
 
 # HTML title tag content
-title = "iron-abacus"
+title = "Borrow Checker"
 
 # include `assets` in web platform
 [web.resource]
