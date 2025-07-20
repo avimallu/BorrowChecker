@@ -44,3 +44,4 @@ runs:
         branch: gh-pages
         folder: ${{ inputs.rootPath }}/${{ inputs.outDirectory }}
         clean: false
+        token: ${{ github.token }}
