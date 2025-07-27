@@ -13,7 +13,7 @@ A simple app to help you split your bills and receipts with multiple people fair
 
 # Development
 
-Run the following command in the root of your project to start developing with the default platform:
+Install [Dioxus](https://dioxuslabs.com/), and run the following command in the root of your project to start developing with the default platform:
 
 ```bash
 dx serve --port 8123
