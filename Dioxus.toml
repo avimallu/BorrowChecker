@@ -1,7 +1,6 @@
 [application]
 
 [web.app]
-out_dir = "dist"
 base_path = "BorrowChecker"
 
 # HTML title tag content
