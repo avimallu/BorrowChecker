@@ -38,6 +38,7 @@ pub enum SplittingError {
     ItemTotalExceedsReceiptTotal(String),
     DecimalParsingError(String),
     InvalidArgument(String),
+    NotProportionallySplittableError(String),
 }
 
 impl From<rust_decimal::Error> for SplittingError {
@@ -61,6 +62,7 @@ impl fmt::Display for SplittingError {
             Self::ItemTotalExceedsReceiptTotal(msg) => write!(f, "{}", msg),
             Self::DecimalParsingError(msg) => write!(f, "{}", msg),
             Self::InvalidArgument(msg) => write!(f, "{}", msg),
+            Self::NotProportionallySplittableError(msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -288,6 +290,80 @@ impl Receipt {
         item_names.push(TOTAL_ITEM_NAME);
 
         Ok((item_names, all_splits))
+    }
+
+    // A ReceiptItem can be split proportionally iff at least ONE
+    // other receipt item is not split by proportion.
+    fn is_proportionally_splittable(&self, index: usize) -> bool {
+        return self
+            .items
+            .iter()
+            .enumerate()
+            .map(|(idx, x)| idx != index && x.is_prop_dist)
+            .min()
+            .unwrap_or(false);
+    }
+
+    pub fn update_item_at_index(
+        &mut self,
+        idx: usize,
+        value: Option<Decimal>,
+        name: Option<String>,
+        shared_by: Option<Vec<String>>,
+        is_prop_dist: Option<bool>,
+    ) -> Result<(), SplittingError> {
+        let is_proportionally_splittable = self.is_proportionally_splittable(idx);
+
+        if let Some(receipt_item) = self.items.get_mut(idx) {
+            // We could use `map` here to be succinct, but that's supposed to be an
+            // anti-pattern? "Don't use map for its side effect".
+            if let Some(value_) = value {
+                receipt_item.value = value_
+            }
+            if let Some(name_) = name {
+                receipt_item.name = name_
+            }
+            if let Some(shared_by_) = shared_by {
+                receipt_item.shared_by = shared_by_
+            }
+            if let Some(is_prop_dist_) = is_prop_dist {
+                if is_prop_dist_ && is_proportionally_splittable {
+                    // Setting is_prop_dist to true when possible
+                    receipt_item.is_prop_dist = true
+                } else if !is_prop_dist {
+                    // Setting is_prop_dist to false and sharing it across all people
+                    receipt_item.is_prop_dist = false;
+                    receipt_item.shared_by = self.shared_by.clone();
+                    receipt_item.share_ratio = vec![Decimal::ONE; self.shared_by.len()];
+                } else {
+                    return Err(SplittingError::NotProportionallySplittableError(
+                        "There aren't enough items left to split proportionally on".into(),
+                    ));
+                }
+            }
+        }
+
+        // Setting the item as (not) proportional means that it is (no longer) determining
+        // proportional splits for other items. Therefore, this proportion needs to be recalculated.
+
+        // This is true for any change except for a change in name of an underlying item, as long
+        // as proportional items exist.
+
+        if self
+            .items
+            .iter()
+            .map(|x| x.is_prop_dist)
+            .max()
+            .unwrap_or(false)
+            && (value.is_some() || shared_by.is_some() || is_prop_dist.is_some())
+        {
+            let prop_share_ratio = self.calculate_overall_proportion(true);
+            for item in self.items.iter().filter(|&x| x.is_prop_dist) {
+                item.share_ratio = prop_share_ratio
+            }
+        }
+
+        Ok(())
     }
 }
 
