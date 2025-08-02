@@ -38,6 +38,7 @@ pub enum SplittingError {
     ItemTotalExceedsReceiptTotal(String),
     DecimalParsingError(String),
     InvalidArgument(String),
+    InvalidIndexError(String),
     NotProportionallySplittableError(String),
 }
 
@@ -62,6 +63,7 @@ impl fmt::Display for SplittingError {
             Self::ItemTotalExceedsReceiptTotal(msg) => write!(f, "{}", msg),
             Self::DecimalParsingError(msg) => write!(f, "{}", msg),
             Self::InvalidArgument(msg) => write!(f, "{}", msg),
+            Self::InvalidIndexError(msg) => write!(f, "{}", msg),
             Self::NotProportionallySplittableError(msg) => write!(f, "{}", msg),
         }
     }
@@ -132,13 +134,9 @@ impl Receipt {
         Ok(self)
     }
 
-    // Obtain a single vector with the exact splits, with or without items with
-    // the is_prop_dist attribute as true
-    fn calculate_overall_proportion(&self, remove_proportional_items: bool) -> Vec<Decimal> {
-        let items = self
-            .items
-            .iter()
-            .filter(|&x| !remove_proportional_items || !x.is_prop_dist);
+    // Obtain a single vector with the exact splits
+    fn calculate_receipt_proportions(&self) -> Vec<Decimal> {
+        let items = self.items.iter().filter(|&x| !x.is_prop_dist);
 
         let mut receipt_split: Vec<Decimal> = vec![Decimal::ZERO; self.shared_by.len()];
         for item in items {
@@ -168,6 +166,31 @@ impl Receipt {
         receipt_split
     }
 
+    pub fn calculate_item_share_ratio_by_proportion(
+        &self,
+        shared_by: &Vec<String>,
+        value: Decimal,
+    ) -> Vec<Decimal> {
+        // Align the proportional splits to the current shared_by ratios
+        let pre_prop_splits: Vec<Decimal> = self
+            .calculate_receipt_proportions()
+            .iter()
+            .zip(self.shared_by.iter())
+            .filter(|(_, person)| shared_by.contains(*person))
+            .map(|(split, _)| split.clone())
+            .collect();
+
+        let pre_prop_split_total: Decimal = pre_prop_splits.iter().sum();
+        let proportional_splits: Vec<Decimal> = pre_prop_splits
+            .iter()
+            .map(|x| x / pre_prop_split_total)
+            .collect();
+        return proportional_splits
+            .iter()
+            .map(|ratio| (ratio * value).round_dp(2))
+            .collect();
+    }
+
     pub fn add_item_split_by_proportion(
         &mut self,
         value: Decimal,
@@ -175,42 +198,17 @@ impl Receipt {
         shared_by: Vec<String>,
     ) -> Result<&mut Self, SplittingError> {
         if shared_by.len() == 0 {
-            return Err(SplittingError::NotEnoughPeopleError(format!(
-                "The number of people sharing the item {} is currently {}. It must be shared by at least 1 person.",
-                name,
-                shared_by.len()
+            return Err(SplittingError::InvalidShareConfiguration(format!(
+                "Number of people sharing this receipt cannot be zero."
             )));
-        } else if name.is_empty() {
+        }
+        if name.is_empty() {
             return Err(SplittingError::InvalidFieldError(
                 "Item name cannot be empty".into(),
             ));
         }
 
-        // These vectors are aligned with the order of self.shared_by
-        let pre_prop_splits = self.calculate_overall_proportion(true);
-        let pre_prop_split_total: Decimal = pre_prop_splits.iter().sum();
-        let pre_prop_ratios: Vec<Decimal> = pre_prop_splits
-            .iter()
-            .map(|x| x / pre_prop_split_total)
-            .collect();
-
-        // This vector's length will be identical to shared_by
-        let share_ratio: Vec<Decimal> = shared_by
-            .iter()
-            .map(|sharer| {
-                pre_prop_ratios
-                    .iter()
-                    .zip(self.shared_by.iter())
-                    .find(|&(_, person)| *sharer == *person)
-                    .map(|(&ratio, _)| ratio * value)
-                    .ok_or_else(|| {
-                        SplittingError::InternalError(format!(
-                            "The sharer {} was not found among the original sharers.",
-                            sharer,
-                        ))
-                    })
-            })
-            .collect::<Result<_, _>>()?;
+        let share_ratio = self.calculate_item_share_ratio_by_proportion(&shared_by, value);
 
         self.items.push(ReceiptItem {
             value,
@@ -256,6 +254,9 @@ impl Receipt {
             let mut splits: Vec<Decimal> = self
                 .shared_by
                 .iter()
+                // If the person is sharing the item, specify the share as the person's share
+                // divided by the item's total shares. This means that an item can be shared
+                // proportional to other costs by fewer people than those present in the receipt.
                 .map(|x| match item.shared_by.iter().position(|name| name == x) {
                     Some(pos) => (item.value * item.share_ratio[pos]
                         / item.share_ratio.iter().sum::<Decimal>())
@@ -271,7 +272,7 @@ impl Receipt {
 
         // Add unaccounted item, if present
         if leftover_amount > Decimal::ZERO {
-            let overall_prop = self.calculate_overall_proportion(true);
+            let overall_prop = self.calculate_receipt_proportions();
             let overall_prop_sum: Decimal = overall_prop.iter().sum();
             let mut splits: Vec<Decimal> = overall_prop
                 .iter()
@@ -295,13 +296,31 @@ impl Receipt {
     // A ReceiptItem can be split proportionally iff at least ONE
     // other receipt item is not split by proportion.
     fn is_proportionally_splittable(&self, index: usize) -> bool {
-        return self
+        let boo: Vec<bool> = self
             .items
             .iter()
             .enumerate()
-            .map(|(idx, x)| idx != index && x.is_prop_dist)
-            .min()
-            .unwrap_or(false);
+            .filter(|(idx, _)| *idx != index)
+            .map(|(_, x)| x.is_prop_dist)
+            .collect();
+
+        return !boo.into_iter().min().unwrap_or(true);
+    }
+
+    pub fn recalculate_proportions(&mut self) {
+        let mut item_share_ratios: Vec<Vec<Decimal>> = Vec::new();
+        for item in self.items.iter().filter(|x| x.is_prop_dist) {
+            item_share_ratios
+                .push(self.calculate_item_share_ratio_by_proportion(&item.shared_by, item.value));
+        }
+        for (item, share_ratio) in self
+            .items
+            .iter_mut()
+            .filter(|x| x.is_prop_dist)
+            .zip(item_share_ratios.into_iter())
+        {
+            item.share_ratio = share_ratio
+        }
     }
 
     pub fn update_item_at_index(
@@ -323,14 +342,19 @@ impl Receipt {
             if let Some(name_) = name {
                 receipt_item.name = name_
             }
-            if let Some(shared_by_) = shared_by {
-                receipt_item.shared_by = shared_by_
+
+            // Learning: Decimal, bool and String implement copy, but Vec<String>
+            // does not, that is why a manual `.clone()` is required here.
+            if let Some(shared_by_) = shared_by.clone() {
+                receipt_item.shared_by = shared_by_;
+                receipt_item.share_ratio = vec![Decimal::ONE; receipt_item.shared_by.len()];
             }
             if let Some(is_prop_dist_) = is_prop_dist {
                 if is_prop_dist_ && is_proportionally_splittable {
                     // Setting is_prop_dist to true when possible
-                    receipt_item.is_prop_dist = true
-                } else if !is_prop_dist {
+                    receipt_item.is_prop_dist = true;
+                    receipt_item.shared_by = self.shared_by.clone();
+                } else if !is_prop_dist_ {
                     // Setting is_prop_dist to false and sharing it across all people
                     receipt_item.is_prop_dist = false;
                     receipt_item.shared_by = self.shared_by.clone();
@@ -341,6 +365,10 @@ impl Receipt {
                     ));
                 }
             }
+        } else {
+            return Err(SplittingError::InvalidIndexError(
+                "Provide index is outside the range of items present in the receipt".into(),
+            ));
         }
 
         // Setting the item as (not) proportional means that it is (no longer) determining
@@ -349,18 +377,43 @@ impl Receipt {
         // This is true for any change except for a change in name of an underlying item, as long
         // as proportional items exist.
 
-        if self
-            .items
-            .iter()
-            .map(|x| x.is_prop_dist)
-            .max()
-            .unwrap_or(false)
+        // When the last proportional item is changed to being non-proportional, the adjustment
+        // to its own value is already made in the `if !is_prop_dist` branch above, so no further
+        // changes need to be made.
+
+        if self.items.iter().filter(|x| x.is_prop_dist).count() > 0
             && (value.is_some() || shared_by.is_some() || is_prop_dist.is_some())
         {
-            let prop_share_ratio = self.calculate_overall_proportion(true);
-            for item in self.items.iter().filter(|&x| x.is_prop_dist) {
-                item.share_ratio = prop_share_ratio
-            }
+            self.recalculate_proportions()
+        }
+
+        Ok(())
+    }
+
+    // Removing, as opposed to updating, is a far simpler operation - just remove the
+    // index specified, and update all other values that depend on proportion. Voila!
+    pub fn remove_item_at_index(&mut self, idx: usize) -> Result<(), SplittingError> {
+        let proportional_count = self.items.iter().filter(|x| x.is_prop_dist).count();
+
+        if idx >= self.items.len() {
+            return Err(SplittingError::InvalidIndexError(
+                "Provided index is out of bounds".to_string(),
+            ));
+        }
+        // Disallow removal of the last proportional item since the rest depend on it
+        else if self.items.iter().filter(|x| !x.is_prop_dist).count() == 1
+            && proportional_count > 0
+            && !self.items.get(idx).unwrap().is_prop_dist
+        {
+            return Err(SplittingError::InvalidIndexError(
+                "The last non-proportional item cannot be removed when there are proportional items in the receipt.".into()
+            ));
+        }
+
+        self.items.remove(idx);
+
+        if proportional_count > 0 {
+            self.recalculate_proportions();
         }
 
         Ok(())
@@ -369,7 +422,7 @@ impl Receipt {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::receipt::Receipt;
+    use crate::core::receipt::{Receipt, SplittingError};
     use crate::utils;
     use rust_decimal::prelude::*;
 
@@ -407,5 +460,209 @@ mod tests {
             f64s_to_decimals(&[110.0, 110.0, 80.0, 300.0]),
         ];
         assert_eq!(expected_splits, actual_splits);
+    }
+
+    fn proportional_receipt_helper() -> Result<Receipt, SplittingError> {
+        let mut receipt = Receipt::new(dec![300], vec!["Alice", "Bob", "Marshall"])?;
+        receipt
+            .add_item_split_by_ratio(
+                dec![30],
+                "Hearty Burger".into(),
+                utils::strs_to_strings(vec!["Alice"]),
+                None,
+            )?
+            .add_item_split_by_ratio(
+                dec![60],
+                "Unhealthy Burger".into(),
+                utils::strs_to_strings(vec!["Bob"]),
+                None,
+            )?
+            .add_item_split_by_ratio(
+                dec![15],
+                "Vegan Salad".into(),
+                utils::strs_to_strings(vec!["Marshall"]),
+                None,
+            )?
+            .add_item_split_by_proportion(
+                dec![50],
+                "Tax".into(),
+                utils::strs_to_strings(vec!["Alice", "Bob"]),
+            )?
+            .add_item_split_by_proportion(
+                dec![50],
+                "Tip".into(),
+                utils::strs_to_strings(vec!["Bob", "Marshall"]),
+            )?;
+        Ok(receipt)
+    }
+
+    #[test]
+    fn test_adding_by_proportions() {
+        let receipt = proportional_receipt_helper().unwrap();
+        assert_eq!(
+            receipt.items[3].share_ratio,
+            f64s_to_decimals(&[16.67, 33.33])
+        );
+        assert_eq!(
+            receipt.items[4].share_ratio,
+            f64s_to_decimals(&[40.0, 10.0])
+        );
+        println!("{:#?}", receipt);
+    }
+
+    #[test]
+    fn test_updated_items() {
+        let mut receipt = proportional_receipt_helper().unwrap();
+        // At this point, the receipt is:
+        // #     Alice   Bob   Marshall   Is Prop?
+        // 0        30
+        // 1               60
+        // 2                         15
+        // 3      16.67 33.33                    x
+        // 4               40      37.5          x
+        let _ = receipt.update_item_at_index(2, Some(dec![30]), None, None, None);
+
+        // At this point, the receipt should be:
+        // #     Alice   Bob   Marshall   Is Prop?
+        // 0        30
+        // 1               60
+        // 2                         30
+        // 3      16.67 33.33                    x
+        // 4            33.33     16.67          x
+        assert_eq!(
+            receipt.items[3].share_ratio,
+            f64s_to_decimals(&[16.67, 33.33])
+        );
+        assert_eq!(
+            receipt.items[4].share_ratio,
+            f64s_to_decimals(&[33.33, 16.67])
+        );
+
+        let _ = receipt.update_item_at_index(2, None, Some("Vegan Air".into()), None, None);
+
+        assert_eq!(
+            receipt.items[3].share_ratio,
+            f64s_to_decimals(&[16.67, 33.33])
+        );
+        assert_eq!(
+            receipt.items[4].share_ratio,
+            f64s_to_decimals(&[33.33, 16.67])
+        );
+        assert_eq!(receipt.items[2].name, "Vegan Air");
+
+        let _ = receipt.update_item_at_index(
+            1,
+            None,
+            None,
+            Some(utils::strs_to_strings(vec!["Bob", "Marshall"])),
+            None,
+        );
+        // At this point, the receipt should be:
+        // #     Alice   Bob   Marshall   Is Prop?
+        // 0        30
+        // 1               30        30
+        // 2                         30
+        // 3        25     25                    x
+        // 4            16.67     33.33          x
+
+        assert_eq!(receipt.items[1].shared_by, vec!["Bob", "Marshall"]);
+        assert_eq!(
+            receipt.items[3].share_ratio,
+            f64s_to_decimals(&[25.0, 25.0])
+        );
+        assert_eq!(
+            receipt.items[4].share_ratio,
+            f64s_to_decimals(&[16.67, 33.33])
+        );
+
+        let _ = receipt.update_item_at_index(4, None, None, None, Some(false));
+        // At this point, the receipt should be:
+        // #     Alice   Bob  Marshall   Is Prop?
+        // 1        30
+        // 2              30        30
+        // 3                        30
+        // 4        25    25                    x
+        // 5     13.33  13.33    13.33          x
+
+        assert_eq!(
+            receipt.items[3].share_ratio,
+            f64s_to_decimals(&[25.0, 25.0])
+        );
+        assert_eq!(
+            receipt.items[4].share_ratio,
+            f64s_to_decimals(&[1.0, 1.0, 1.0])
+        );
+
+        for i in 0..3 {
+            let _ = receipt.update_item_at_index(i, None, None, None, Some(true));
+        }
+        // This should fail since this is the last non-proportional item (3 is already proportional)
+        let result = receipt.update_item_at_index(4, None, None, None, Some(true));
+        assert!(matches!(
+            result,
+            Err(SplittingError::NotProportionallySplittableError(_))
+        ));
+
+        // Should work fine now!
+        let _ = receipt.update_item_at_index(3, None, None, None, Some(false));
+        let result = receipt.update_item_at_index(4, None, None, None, Some(true));
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn test_removing_items() {
+        let mut receipt_1 = proportional_receipt_helper().unwrap();
+        let mut receipt_2 = proportional_receipt_helper().unwrap();
+        // Starting point of the receipt is
+        // #     Alice   Bob  Marshall   Is Prop?
+        // 0        30
+        // 1              60
+        // 2                        15
+        // 3        25    25                    x
+        // 4              40        10          x
+        let _ = receipt_1.remove_item_at_index(2);
+        assert_eq!(
+            receipt_1.items[3].share_ratio,
+            f64s_to_decimals(&[50.0, 0.0])
+        );
+
+        let _ = receipt_2.update_item_at_index(
+            1,
+            None,
+            None,
+            Some(utils::strs_to_strings(vec!["Alice", "Bob", "Marshall"])),
+            None,
+        );
+        // At this point, the receipt is:
+        // #     Alice   Bob  Marshall   Is Prop?
+        // 0        30
+        // 1        20    20        20
+        // 2                        15
+        // 3      37.5  12.5                    x
+        // 4            12.5      37.5          x
+        assert_eq!(
+            receipt_2.items[3].share_ratio,
+            f64s_to_decimals(&[35.71, 14.29])
+        );
+        assert_eq!(
+            receipt_2.items[4].share_ratio,
+            f64s_to_decimals(&[18.18, 31.82])
+        );
+
+        let _ = receipt_2.remove_item_at_index(1);
+        // At this point, the receipt should be:
+        // #     Alice   Bob  Marshall   Is Prop?
+        // 0        30
+        // 1                        15
+        // 2        50.                         x
+        // 3                        50          x
+        assert_eq!(
+            receipt_2.items[2].share_ratio,
+            f64s_to_decimals(&[50.0, 0.0])
+        );
+        assert_eq!(
+            receipt_2.items[3].share_ratio,
+            f64s_to_decimals(&[0.0, 50.0])
+        );
     }
 }
