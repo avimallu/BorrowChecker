@@ -10,6 +10,17 @@ pub fn SplitUI() -> Element {
     if let Some(receipt) = RECEIPT_STATE.read().as_ref() {
         let (_, balance) = receipt.get_itemized_total_and_leftover();
         let item_count = receipt.items.len();
+        let enable_proportional_add = if receipt
+            .items
+            .iter()
+            .map(|x| x.is_prop_dist)
+            .max()
+            .unwrap_or(false)
+        {
+            true
+        } else {
+            false
+        };
         rsx! {
             document::Title { "BorrowChecker | Split" }
             header { class: "hero is-small is-primary",
