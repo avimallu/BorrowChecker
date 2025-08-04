@@ -293,18 +293,20 @@ impl Receipt {
         Ok((item_names, all_splits))
     }
 
-    // A ReceiptItem can be split proportionally iff at least ONE
-    // other receipt item is not split by proportion.
-    fn is_proportionally_splittable(&self, index: usize) -> bool {
-        let boo: Vec<bool> = self
+    pub fn is_proportionally_splittable(&self, index: usize) -> bool {
+        // If there is only one item, it is not proportionally splittable
+        if self.items.len() <= 1 || index > self.items.len() {
+            return false;
+        }
+
+        // A ReceiptItem can be split proportionally iff at least ONE
+        // other receipt item is not split by proportion.
+        return self
             .items
             .iter()
             .enumerate()
             .filter(|(idx, _)| *idx != index)
-            .map(|(_, x)| x.is_prop_dist)
-            .collect();
-
-        return !boo.into_iter().min().unwrap_or(true);
+            .any(|(_, x)| !x.is_prop_dist);
     }
 
     pub fn recalculate_proportions(&mut self) {
@@ -390,27 +392,38 @@ impl Receipt {
         Ok(())
     }
 
-    // Removing, as opposed to updating, is a far simpler operation - just remove the
-    // index specified, and update all other values that depend on proportion. Voila!
-    pub fn remove_item_at_index(&mut self, idx: usize) -> Result<(), SplittingError> {
+    pub fn is_removable(&self, idx: usize) -> bool {
         let proportional_count = self.items.iter().filter(|x| x.is_prop_dist).count();
 
         if idx >= self.items.len() {
-            return Err(SplittingError::InvalidIndexError(
-                "Provided index is out of bounds".to_string(),
-            ));
+            return false;
+            // Err(SplittingError::InvalidIndexError(
+            //     "Provided index is out of bounds".to_string(),
+            // ));
         }
         // Disallow removal of the last proportional item since the rest depend on it
         else if self.items.iter().filter(|x| !x.is_prop_dist).count() == 1
             && proportional_count > 0
             && !self.items.get(idx).unwrap().is_prop_dist
         {
-            return Err(SplittingError::InvalidIndexError(
-                "The last non-proportional item cannot be removed when there are proportional items in the receipt.".into()
-            ));
+            return false;
+            // Err(SplittingError::InvalidIndexError(
+            //     "The last non-proportional item cannot be removed when there are proportional items in the receipt.".into()
+            // ));
         }
 
-        self.items.remove(idx);
+        true
+    }
+
+    // Removing, as opposed to updating, is a far simpler operation - just remove the
+    // index specified, and update all other values that depend on proportion. Voila!
+    pub fn remove_item_at_index(&mut self, idx: usize) -> Result<(), SplittingError> {
+        let proportional_count = self.items.iter().filter(|x| x.is_prop_dist).count();
+
+        if self.is_removable(idx) {
+            self.items.remove(idx);
+        } else {
+        }
 
         if proportional_count > 0 {
             self.recalculate_proportions();
@@ -460,6 +473,26 @@ mod tests {
             f64s_to_decimals(&[110.0, 110.0, 80.0, 300.0]),
         ];
         assert_eq!(expected_splits, actual_splits);
+    }
+
+    #[test]
+    fn test_is_proportional() {
+        let mut receipt = Receipt::new(dec![300], vec!["Alice", "Bob", "Marshall"]).unwrap();
+        assert_eq!(receipt.is_proportionally_splittable(100), false);
+        let _ = receipt.add_item_split_by_ratio(
+            dec![25],
+            "Hearty Burger".into(),
+            utils::strs_to_strings(vec!["Alice"]),
+            None,
+        );
+        assert_eq!(receipt.is_proportionally_splittable(0), false);
+        let _ = receipt.add_item_split_by_ratio(
+            dec![10],
+            "Vegan Salad".into(),
+            utils::strs_to_strings(vec!["Marshall"]),
+            None,
+        );
+        assert_eq!(receipt.is_proportionally_splittable(0), true);
     }
 
     fn proportional_receipt_helper() -> Result<Receipt, SplittingError> {
@@ -654,7 +687,7 @@ mod tests {
         // #     Alice   Bob  Marshall   Is Prop?
         // 0        30
         // 1                        15
-        // 2        50.                         x
+        // 2        50                          x
         // 3                        50          x
         assert_eq!(
             receipt_2.items[2].share_ratio,
