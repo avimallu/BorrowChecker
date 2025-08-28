@@ -75,7 +75,7 @@ pub fn SplitUI() -> Element {
             }
             footer { class: "hero is-small is-primary",
                 div { class: "hero-body has-text-centered is-flex is-justify-content-center",
-                    p { class: "subtitle is-size-7 mr-1", "Built with Rust & Dioxus | " }
+                    p { class: "subtitle is-size-7 mr-1", "% = split proportionally | " }
                     p { class: "subtitle is-size-7 mr-1", "👾🤖👻 |" }
                     a {
                         class: "subtitle is-size-7 mr-1",
@@ -99,10 +99,10 @@ fn ColorBalanceTitle(balance: Decimal) -> Element {
             p { class: "subtitle is-size-5", "left to balance" }
         } else if balance < Decimal::ZERO {
             p { class: "title has-text-danger is-size-4", "Remaining: {balance}" }
-            p { class: "subtitle is-size-6", "Item total exceeds receipt total." }
+            p { class: "subtitle is-size-6", "item totals > receipt total" }
         } else {
             p { class: "title has-text-link  is-size-4", "0" }
-            p { class: "subtitle is-size-6", "Perfectly balanced, as all things should be." }
+            p { class: "subtitle is-size-6", "balanced" }
         }
     }
 }
